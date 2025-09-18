@@ -5,7 +5,7 @@ from pathlib import Path
 import pydicom
 from tqdm.auto import tqdm
 from ..preprocessing_configs import DataInfoPipelineConfig as Config
-from ..utils.path_modify_utils import rename_patient_folder, rename_phase_folder
+from ..utils.path_modify_utils import rename_patient_folder, rename_phase_folder, rename_label_file
 
 class DataInfoPipeline:
     def __init__(self):
@@ -43,6 +43,9 @@ class DataInfoPipeline:
         print("Rename all phase folder ...", end="")
         rename_phase_folder(self.config.raw_data_path)
         print("\rRename all phase folder ... Done")
+        print("Rename all label file ...", end="")
+        rename_label_file(self.config.label_data_path)
+        print("\rRename all label file ... Done")
         data_info = self.gen_data_info(self.config.raw_data_path)
         with open(self.config.data_info_json_path, "w", encoding="utf-8") as j:
             json.dump(data_info, j, ensure_ascii=False, indent=4)
