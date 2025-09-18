@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 @dataclass
 class DataInfoPipelineConfig:
     raw_data_path: Path = Path("./data_folder/raw_data/MVI/").absolute()
+    label_data_path: Path = Path("./data_folder/raw_data/label/").absolute()
     data_info_json_path: Path = raw_data_path.joinpath("data_info.json")
 
 @dataclass
@@ -19,14 +20,16 @@ class EqualizeConfig:
 @dataclass
 class SlicePreprocessingConfig:
     raw_data_path: Path = DataInfoPipelineConfig.raw_data_path
+    label_data_path: Path = DataInfoPipelineConfig.label_data_path
     save_data_path: Path = Path("./data_folder/processed_data/first_version").absolute()
-    num_producer: int = 1
+    num_producer: int = 2
     num_producer_thread: int = 4
     num_consumer: int = 1
     target_slice_size: tuple[int, int] = (512, 512)
     value_range: tuple[int, int] = (-1024, 1024)
     align_slice_index: tuple[int] = tuple({1, 5, 7})
     padding_value: int = 0
+    split_num: int = 5
     _equalize_config = EqualizeConfig(value_range)
     def __post_init__(self,):
         image_tr_path = self.save_data_path.joinpath("imagesTr")
