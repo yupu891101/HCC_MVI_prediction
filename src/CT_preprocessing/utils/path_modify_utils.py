@@ -26,7 +26,7 @@ def rename_phase_folder(data_root: str) -> None:
         phase_names = [
             "0_non_contrast_phase",
             "1_arterial_phase",
-            "2_protal_venous_phase",
+            "2_portal_venous_phase",
             "3_delayed_phase"
         ]
 
@@ -38,3 +38,31 @@ def rename_phase_folder(data_root: str) -> None:
         for new_name, old_path in zip(phase_names, phase_folders):
             new_path = old_path.parent.joinpath(new_name)
             shutil.move(old_path, new_path)
+
+def grouping_label_path(label_root: Path) -> dict[int, list[str]]:
+    label_grouping_dict: dict[int, list[str]] = dict()
+    for label_path in label_root.glob("*.nrrd"):
+        label_file_name = label_path.name
+        patient_id = int(label_file_name.split("_")[0])
+        if patient_id not in label_grouping_dict:
+            label_grouping_dict[patient_id] = []
+        label_grouping_dict[patient_id].append(label_path.as_posix())
+    return dict(sorted(label_grouping_dict.items(), key=lambda item: item[0]))
+
+def rename_label_file(label_root: Path):
+    label_dict = grouping_label_path(label_root)
+    for patient_id, label_files in label_dict.items():
+        label_files.sort()
+        phase_names = [
+            "0_non_contrast_phase",
+            "1_arterial_phase",
+            "2_portal_venous_phase",
+            "3_delayed_phase"
+        ]
+        if len(label_files) < 4:
+            phase_names.pop(0)
+        for label_path, phase_name in zip(label_files, phase_names):
+            label_path = Path(label_path).absolute()
+            new_name = f"{patient_id:03d}_{phase_name}.nrrd"
+            new_path = label_path.parent.joinpath(new_name).absolute()
+            shutil.move(label_path, new_path)
