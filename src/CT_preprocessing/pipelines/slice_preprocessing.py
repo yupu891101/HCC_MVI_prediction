@@ -35,10 +35,14 @@ else:
 @dataclass
 class PatientDicom:
     patient_id: str
+    slice_thickness: int
     value_range: tuple[int, int]
     arterial_phase: np.ndarray = field(repr=False)
     portal_venous_phase: np.ndarray = field(repr=False)
     delayed_phase: np.ndarray = field(repr=False)
+    arterial_label: np.ndarray | None = field(default=None, repr=False)
+    portal_venous_label: np.ndarray | None = field(default=None, repr=False)
+    delayed_label: np.ndarray | None = field(default=None, repr=False)
 
     proc_arterial_phase: np.ndarray | None = field(default=None, init=False, repr=False)
     proc_portal_venous_phase: np.ndarray | None = field(default=None, init=False, repr=False)
@@ -49,6 +53,7 @@ class PatientDicom:
     align_result: dict[str, int] | None = field(default=None, init=False)
     all_proc_phase: dict[str, np.ndarray] = field(init=False, repr=False)
     all_phase: dict[str, np.ndarray] = field(init=False, repr=False)
+    all_label: dict[str, np.ndarray | None] = field(init=False, repr=False)
     ref_phase: Literal[
         "arterial_phase", "portal_venous_phase", "delayed_phase"
     ] | None = field(default=None, init=False)
@@ -67,6 +72,11 @@ class PatientDicom:
             "arterial_phase": self.arterial_phase,
             "portal_venous_phase": self.portal_venous_phase,
             "delayed_phase": self.delayed_phase
+        }
+        self.all_label = {
+            "arterial_label": self.arterial_label,
+            "portal_venous_label": self.portal_venous_label,
+            "delayed_label": self.delayed_label
         }
 
     def clip(self, dicom_array: np.ndarray):
@@ -87,30 +97,65 @@ class PatientDicom:
     def set_ref_phase(self, phase_name: str):
         self.ref_phase = phase_name
 
-
 class DataProducer:
     def __init__(self ,config: Config):
         self.config = config
 
-    @staticmethod
-    def read_all_dicom(phase_folder: Path) -> dict[str, np.ndarray]:
+    def read_all_dicom(self, phase_folder: Path) -> dict[str, np.ndarray]:
         print(phase_folder.name, "start")
         if "non_contrast" in phase_folder.name:
             return dict()
         reader = sitk.ImageSeriesReader()
         reader.SetFileNames(reader.GetGDCMSeriesFileNames(phase_folder))
-        dicom_array = sitk.GetArrayFromImage(reader.Execute())
+        slice_instance = reader.Execute()
+        dicom_array = sitk.GetArrayFromImage(slice_instance)
+        slice_thickness = self.get_thickness(slice_instance)
         phase_name = "_".join(phase_folder.name.split("_")[1:])
         print(phase_folder.name, "done")
-        return {phase_name: dicom_array}
+        return {phase_name: dicom_array, "slice_thickness": slice_thickness}
 
+    @staticmethod
+    def read_all_label(label_file: Path) -> dict[str, np.ndarray]:
+        print(label_file.stem, "start")
+        if "non_contrast" in label_file.stem:
+            return dict()
+        label_array = sitk.GetArrayFromImage(sitk.ReadImage(label_file))
+        label_name = "_".join(label_file.stem.split("_")[2:]).replace("phase", "label")
+        print(label_file.stem, "done")
+        return {label_name: label_array}
+
+    def get_thickness(self, slice_instance: sitk.Image) -> int:
+        slice_size: tuple = slice_instance.GetSize()
+        slice_thickness_index = slice_size.index(min(slice_size))
+        return int(slice_instance.GetSpacing()[slice_thickness_index])
+    
     def read_all_phase(self, patient_folder: Path) -> PatientDicom:
         patient_dicom = {"patient_id": patient_folder.name, "value_range": self.config.value_range}
         with ThreadPoolExecutor(max_workers=self.config.num_producer_thread) as excutor:
             dicom_results = excutor.map(self.read_all_dicom, patient_folder.glob("*[!.jpg]"))
+
+        with ThreadPoolExecutor(max_workers=self.config.num_producer_thread) as excutor:
+            label_results = excutor.map(
+                self.read_all_label,
+                self.config.label_data_path.glob(f"{patient_folder.name}*.nrrd")
+            )
+
         for result in dicom_results:
             patient_dicom.update(result)
+        for label in label_results:
+            patient_dicom.update(label)
         return PatientDicom(**patient_dicom)
+
+    def validate_label(self, patient_dicom: PatientDicom):
+        if not (
+            all(label is None for label in patient_dicom.all_label.values()) or
+            all(label is not None for label in patient_dicom.all_label.values())
+        ):
+            missing_phase = [
+                phase for phase, label in patient_dicom.all_label.items()
+                if label is None
+            ]
+            raise FileNotFoundError(f"Missing {missing_phase} label file of patient: {patient_dicom.patient_id}")
 
     def run(self, folder_queue: Queue[Path], dicom_queue: Queue[PatientDicom], early_stop = False):
         print("Start to load file")
@@ -120,6 +165,7 @@ class DataProducer:
                 break
             print(f"start to load {patient_folder} dicom")
             patient_dicom = self.read_all_phase(patient_folder)
+            self.validate_label(patient_dicom)
             print(f"load {patient_folder} dicom done")
             dicom_queue.put(patient_dicom)
             if early_stop:
@@ -146,7 +192,7 @@ class DataConsumer:
         score = correlation_array.max()
         return score
 
-    def slice_augment(self, dicom_array: np.ndarray) -> PatientDicom:
+    def slice_augment(self, dicom_array: np.ndarray) -> np.ndarray:
         dicom_array = self.slice_equalize(dicom_array, self.config.equalize_config)
         dicom_array = slice_resize(dicom_array, self.config.target_slice_size)
         return dicom_array
@@ -168,6 +214,7 @@ class DataConsumer:
         offset_result = dict()
         for phase_name, target_pahse in patient_dicom.all_proc_phase.items():
             if phase_name == shortest_phase_name:
+                offset_result[phase_name] = 0
                 continue
             offset_result[phase_name] = self._slice_align(
                 self.config.align_slice_index,
@@ -177,13 +224,30 @@ class DataConsumer:
         patient_dicom.set_align_result(offset_result)
 
     def process_dicom(self, patient_dicom: PatientDicom) -> PatientDicom:
-        for phase_dicom in patient_dicom.all_proc_phase.values():
+        for (phase_name, phase_dicom), (label_phase_name, phase_label) in zip(
+            patient_dicom.all_proc_phase.items(),
+            patient_dicom.all_label.items()
+        ):
             phase_dicom = self.slice_augment(phase_dicom)
+            phase_label = (
+                slice_resize(phase_label, self.config.target_slice_size, "Nearest")
+                if phase_label is not None else None
+            )
+            if phase_label is not None:
+                if len(phase_dicom) != len(phase_label):
+                    raise ValueError(
+                        f"The lenth of CT from patient: {patient_dicom.patient_id}"
+                        f" of phase: {phase_name} is different from its label: {label_phase_name}."
+                        f" CT shape: {phase_dicom.shape}, label shape: {phase_label.shape}."
+                    )
         return patient_dicom
 
-    def dicom_export_aligment(
+    def alignment(
         self,
-        patient_dicom: PatientDicom
+        align_result: dict[str, int],
+        process_dict: dict[str, np.ndarray],
+        ref_phase: str,
+        target_instance: Literal["phase", "label"]
     ):
         """
         根據多個 offset 對齊並用 padding_val 補齊 ref_list 和多個 tgt_list。
@@ -197,43 +261,103 @@ class DataConsumer:
         Returns:
             Dict[str, List]: 包含所有補齊後列表的字典。
         """
-        # 1. 計算所有列表需要的總長度
+        if target_instance == "label":
+            ref_phase = ref_phase.replace("phase", "label")
+            align_result = {
+                phase.replace("phase", "label"): offset
+                for phase, offset in align_result.items()
+            }
+        print("#"*50)
+        print(f"alignment params: {ref_phase}, {align_result}")
 
-        # 計算所有列表需要的最長前端 padding
-        # 這由最大的 offset 決定（因為 ref_list 向右偏移）
-        ref_phase = patient_dicom.ref_phase
-        max_offset = max(0, *list(patient_dicom.align_result.values()))
-
+        max_offset = max(0, *list(align_result.values()))
+        print("max_offset:", max_offset)
+        # 1. 計算所有array需要的總長度
         # 每個列表的總長度 = 自己的長度 + 自己的 offset + 最大 offset
         # 取所有列表中的最大長度作為最終總長度
+        for tgt_phase, offset in align_result.items():
+            print(f"phase: {tgt_phase}", "phase_length:", process_dict[tgt_phase].shape[0], "offset:", offset)
         total_length = max(
-            patient_dicom.all_phase[ref_phase].shape[0] + max_offset,
+            process_dict[ref_phase].shape[0] + max_offset,
             *[
-                patient_dicom.all_phase[tgt_phase].shape[0] + max_offset - offset
-                for tgt_phase, offset in patient_dicom.align_result.items()
+                process_dict[tgt_phase].shape[0] + max_offset - offset
+                for tgt_phase, offset in align_result.items()
             ]
         )
-
-        for phase_name, phase_dicom in patient_dicom.all_phase.items():
+        print("total_length:", total_length)
+        for phase_name, phase_array in process_dict.items():
             front_padding = (
                 max_offset if phase_name == ref_phase
-                else max_offset - patient_dicom.align_result[phase_name]
+                else max_offset - align_result[phase_name]
             )
-            back_padding = total_length - phase_dicom.shape[0] - front_padding
+            back_padding = total_length - phase_array.shape[0] - front_padding
+            print(f"front_padding, back_padding: {front_padding, back_padding}")
             padding_width = ((front_padding, back_padding), (0, 0), (0, 0))
-            phase_dicom = np.pad(
-                phase_dicom, padding_width, mode="constant", constant_values=self.config.padding_value
+            phase_array = np.pad(
+                phase_array, padding_width, mode="constant", constant_values=self.config.padding_value
             )
 
-    def save_dicom_to_nii(self, patient_dicom: PatientDicom):
-        for idx, (phase_name, phase_dicom) in enumerate(patient_dicom.all_phase.items()):
-            phase_id = str(idx + 1).zfill(4)
-            print(f"Saving {phase_name} of patient {patient_dicom.patient_id} with id: {phase_id}")
-            save_path = self.config.save_data_path.joinpath(
-                f"imagesTr/HCC_{patient_dicom.patient_id}_{phase_id}.nii.gz"
+    def dicom_export_aligment(self,patient_dicom: PatientDicom):
+        self.alignment(
+            patient_dicom.align_result,
+            patient_dicom.all_phase,
+            patient_dicom.ref_phase,
+            "phase"
+        )
+        self.alignment(
+            patient_dicom.align_result,
+            patient_dicom.all_label,
+            patient_dicom.ref_phase,
+            "label"
+        )
+
+    def _save_dicom_to_nii(
+            self,
+            phase_dicom: np.ndarray,
+            phase_label: np.ndarray | None,
+            save_category: str,
+            patient_id: str,
+            phase_id: int,
+            need_split: bool
+        ):
+        if need_split:
+            split_dicoms: list[np.ndarray] = [
+                phase_dicom[i::self.config.split_num] for i in range(self.config.split_num)
+            ]
+            split_labels: list[np.ndarray] = [
+                phase_label[i::self.config.split_num] for i in range(self.config.split_num)
+            ] if phase_label is not None else [None] * self.config.split_num
+        else:
+            split_dicoms = [phase_dicom]
+            split_labels = [phase_label]
+
+        for idx, (dicom, label) in enumerate(zip(split_dicoms, split_labels)):
+            save_name = f"{patient_id}G{idx:02d}P{phase_id}"
+            dicom_save_path = self.config.save_data_path.joinpath(
+                f"{save_category}/HCC_{save_name}_{phase_id:04d}.nii.gz"
             )
-            print("saving path:", os.path.abspath(save_path))
-            sitk.WriteImage(sitk.GetImageFromArray(phase_dicom), save_path)
+            label_save_path = self.config.save_data_path.joinpath(
+                f"labelsTr/HCC_{save_name}.nii.gz"
+            )
+            sitk.WriteImage(sitk.GetImageFromArray(dicom), dicom_save_path)
+            if label is not None:
+                sitk.WriteImage(sitk.GetImageFromArray(label), label_save_path)
+
+    def save_dicom_to_nii(self, patient_dicom: PatientDicom):
+        save_category = "imagesTs" if patient_dicom.arterial_label is None else "imagesTr"
+        need_split = patient_dicom.slice_thickness < 5
+
+        for idx, (phase_name, phase_dicom) in enumerate(patient_dicom.all_phase.items()):
+            phase_id = idx + 1
+            print(f"Saving {phase_name} of patient {patient_dicom.patient_id} with id: {phase_id}")
+            self._save_dicom_to_nii(
+                phase_dicom,
+                patient_dicom.all_label[phase_name.replace("phase", "label")],
+                save_category,
+                patient_dicom.patient_id,
+                phase_id,
+                need_split
+            )
 
     def export_dicom(self, patient_dicom: PatientDicom):
         for phase_dicom in patient_dicom.all_phase.values():
@@ -257,7 +381,7 @@ class DataConsumer:
             self.export_dicom(patient_dicom)
             print(f"export {patient_dicom} done")
 
-class SlicePreprocessingPipeline():
+class SlicePreprocessingPipeline:
     def __init__(self):
         self.config = Config()
 
