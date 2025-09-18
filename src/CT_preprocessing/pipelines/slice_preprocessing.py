@@ -128,7 +128,7 @@ class DataProducer:
         slice_size: tuple = slice_instance.GetSize()
         slice_thickness_index = slice_size.index(min(slice_size))
         return int(slice_instance.GetSpacing()[slice_thickness_index])
-    
+
     def read_all_phase(self, patient_folder: Path) -> PatientDicom:
         patient_dicom = {"patient_id": patient_folder.name, "value_range": self.config.value_range}
         with ThreadPoolExecutor(max_workers=self.config.num_producer_thread) as excutor:
