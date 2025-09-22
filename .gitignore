@@ -211,3 +211,4 @@ __marimo__/
 
 #project
 data_folder/*
+*tmp*/*
