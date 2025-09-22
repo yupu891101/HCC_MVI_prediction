@@ -18,21 +18,16 @@ def normalized_cross_correlation_fft(array1: np.ndarray, array2: np.ndarray) -> 
     array2 = array2.astype(np.float64)
 
     # 減去均值
-    array1_mean = array1.mean()
-    array2_mean = array2.mean()
-    array1_centered = array1 - array1_mean
-    array2_centered = array2 - array2_mean
+    array1 = array1 - array1.mean()
+    array2 = array2 - array2.mean()
+    cross_correlation = fftconvolve(array1, np.flip(array2), mode='same')
 
-    # 互相關（使用 FFT 實現）
-    cross_correlation = fftconvolve(array1_centered, np.flip(array2_centered), mode='same')
-
-    # 標準化步驟與方法一相同
-    array1_auto_correlation = np.sum(array1_centered**2)
-    array2_auto_correlation = np.sum(array2_centered**2)
+    array1_auto_correlation = np.sum(array1**2)
+    ones_array1 = np.ones_like(array1)
+    array2_auto_correlation = fftconvolve(array2**2, np.flip(ones_array1), mode='same')
 
     denominator = np.sqrt(array1_auto_correlation * array2_auto_correlation)
-    if denominator == 0:
-        return np.zeros_like(cross_correlation)
+    denominator[denominator == 0] = 1e-12
 
     normalized_result = cross_correlation / denominator
 

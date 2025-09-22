@@ -18,10 +18,10 @@ if __package__ :
     from ..preprocessing_configs import EqualizeConfig
     from ..utils.preprocess_utils import normalized_cross_correlation_fft, slice_resize
 else:
+    # import for multiprocessing and directly run
     sys.path.append("./src/CT_preprocessing/")
     preprocessing_configs = importlib.import_module("preprocessing_configs")
     preprocess_utils = importlib.import_module("utils.preprocess_utils")
-    # 2. 從載入的模組中存取類別
     Config = preprocessing_configs.SlicePreprocessingConfig
     EqualizeConfig = preprocessing_configs.EqualizeConfig
     normalized_cross_correlation_fft = preprocess_utils.normalized_cross_correlation_fft
@@ -32,6 +32,8 @@ else:
 # from ..preprocessing_configs import EqualizeConfig
 # from ..utils.preprocess_utils import normalized_cross_correlation_fft, slice_resize
 
+Confidence = float
+Offset = int
 @dataclass
 class PatientDicom:
     patient_id: str
@@ -79,10 +81,11 @@ class PatientDicom:
             "delayed_label": self.delayed_label
         }
 
-    def clip(self, dicom_array: np.ndarray):
+    def clip(self, dicom_array: np.ndarray, value_range: tuple[int, int] | None = None):
+        min_val, max_val = value_range or (self.min_clip_val, self.max_clip_val)
         return np.clip(
             dicom_array,
-            min=self.min_clip_val, max=self.max_clip_val,
+            min=min_val, max=max_val,
             dtype=np.float32
         )
 
@@ -163,6 +166,8 @@ class DataProducer:
             patient_folder = folder_queue.get()
             if patient_folder is None:
                 break
+            while not dicom_queue.qsize() < self.config.max_dicom_queue:
+                pass
             print(f"start to load {patient_folder} dicom")
             patient_dicom = self.read_all_phase(patient_folder)
             self.validate_label(patient_dicom)
@@ -187,7 +192,22 @@ class DataConsumer:
             )
         return dicom_array
 
-    def cal_similarity(self, ref_slice: np.ndarray, target_slice: np.ndarray) -> float:
+    @staticmethod
+    def get_confidence(scores: np.ndarray) -> float:
+        max_score = scores.max()
+
+        # 創建一個不包含最高分的 numpy 陣列
+        other_scores = scores[scores<max_score]
+        average_of_others = np.mean(other_scores)
+        std_of_others = np.std(other_scores)
+
+        # 計算標準化強度
+        strength = (max_score - average_of_others) / std_of_others
+
+        return strength
+
+    @staticmethod
+    def cal_similarity(ref_slice: np.ndarray, target_slice: np.ndarray) -> float:
         correlation_array = normalized_cross_correlation_fft(ref_slice, target_slice)
         score = correlation_array.max()
         return score
@@ -197,15 +217,19 @@ class DataConsumer:
         dicom_array = slice_resize(dicom_array, self.config.target_slice_size)
         return dicom_array
 
-    def _slice_align(self, slice_indecies: tuple[int], ref_dicom: np.ndarray, target_dicom: np.ndarray) -> int:
-        offset_index_list: list[int] = []
+    def _slice_align(self, slice_percentile: tuple[int], ref_dicom: np.ndarray, target_dicom: np.ndarray) -> int:
+        offset_dict: dict[Confidence, Offset] = dict()
+        slice_indecies = [int(percentile / 100 * len(ref_dicom)) for percentile in slice_percentile]
         for slice_index in slice_indecies:
             ref_slice = ref_dicom[slice_index]
             score_list: list[float] = []
             for target_slice in target_dicom:
                 score_list.append(self.cal_similarity(ref_slice, target_slice))
-            offset_index_list.append(score_list.index(max(score_list)) - slice_index)
-        return round(sum(offset_index_list) / len(offset_index_list))
+            confidence = self.get_confidence(np.array(score_list))
+
+            offset_dict[confidence] = score_list.index(max(score_list)) - slice_index
+        offset_list = [v for _, v in sorted(offset_dict.items(), reverse=True)][:self.config.top_k_offset]
+        return round(sum(offset_list) / len(offset_list))
 
     def slice_align(self, patient_dicom: PatientDicom) -> PatientDicom:
         shortest_phase_name = min(patient_dicom.all_proc_phase, key=lambda k: len(patient_dicom.all_proc_phase[k]))
@@ -217,7 +241,7 @@ class DataConsumer:
                 offset_result[phase_name] = 0
                 continue
             offset_result[phase_name] = self._slice_align(
-                self.config.align_slice_index,
+                self.config.align_slice_percentile,
                 ref_phase,
                 target_pahse
             )
@@ -228,8 +252,8 @@ class DataConsumer:
             patient_dicom.all_proc_phase.items(),
             patient_dicom.all_label.items()
         ):
-            phase_dicom = self.slice_augment(phase_dicom)
-            phase_label = (
+            patient_dicom.all_proc_phase[phase_name] = self.slice_augment(phase_dicom)
+            patient_dicom.all_label[label_phase_name] = (
                 slice_resize(phase_label, self.config.target_slice_size, "Nearest")
                 if phase_label is not None else None
             )
@@ -267,11 +291,8 @@ class DataConsumer:
                 phase.replace("phase", "label"): offset
                 for phase, offset in align_result.items()
             }
-        print("#"*50)
-        print(f"alignment params: {ref_phase}, {align_result}")
 
         max_offset = max(0, *list(align_result.values()))
-        print("max_offset:", max_offset)
         # 1. 計算所有array需要的總長度
         # 每個列表的總長度 = 自己的長度 + 自己的 offset + 最大 offset
         # 取所有列表中的最大長度作為最終總長度
@@ -284,16 +305,14 @@ class DataConsumer:
                 for tgt_phase, offset in align_result.items()
             ]
         )
-        print("total_length:", total_length)
         for phase_name, phase_array in process_dict.items():
             front_padding = (
                 max_offset if phase_name == ref_phase
                 else max_offset - align_result[phase_name]
             )
             back_padding = total_length - phase_array.shape[0] - front_padding
-            print(f"front_padding, back_padding: {front_padding, back_padding}")
             padding_width = ((front_padding, back_padding), (0, 0), (0, 0))
-            phase_array = np.pad(
+            process_dict[phase_name] = np.pad(
                 phase_array, padding_width, mode="constant", constant_values=self.config.padding_value
             )
 
@@ -349,7 +368,6 @@ class DataConsumer:
 
         for idx, (phase_name, phase_dicom) in enumerate(patient_dicom.all_phase.items()):
             phase_id = idx + 1
-            print(f"Saving {phase_name} of patient {patient_dicom.patient_id} with id: {phase_id}")
             self._save_dicom_to_nii(
                 phase_dicom,
                 patient_dicom.all_label[phase_name.replace("phase", "label")],
@@ -360,16 +378,17 @@ class DataConsumer:
             )
 
     def export_dicom(self, patient_dicom: PatientDicom):
-        for phase_dicom in patient_dicom.all_phase.values():
-            phase_dicom = patient_dicom.clip(phase_dicom)
-            phase_dicom = slice_resize(phase_dicom, self.config.target_slice_size, "Nearest")
+        for phase_name, phase_dicom in patient_dicom.all_phase.items():
+            patient_dicom.all_phase[phase_name] = patient_dicom.clip(phase_dicom, self.config.export_value_range)
+            patient_dicom.all_phase[phase_name] = slice_resize(
+                patient_dicom.all_phase[phase_name], self.config.target_slice_size, "Nearest"
+            )
 
         self.dicom_export_aligment(patient_dicom)
         self.save_dicom_to_nii(patient_dicom)
 
     def run(self, dicom_queue: Queue[PatientDicom]):
         while True:
-            print(dicom_queue)
             patient_dicom = dicom_queue.get()
             if patient_dicom is None:
                 print("leave consumer")
@@ -377,7 +396,9 @@ class DataConsumer:
             print(f"Start to process {patient_dicom}")
             patient_dicom = self.process_dicom(patient_dicom)
             print(f"process {patient_dicom} done")
+            print(f"Start to align {patient_dicom}")
             self.slice_align(patient_dicom)
+            print(f"Align {patient_dicom} done")
             self.export_dicom(patient_dicom)
             print(f"export {patient_dicom} done")
 
@@ -388,14 +409,14 @@ class SlicePreprocessingPipeline:
     def run(self):
         data_root = self.config.raw_data_path
         folder_queue = mQueue()
-        dicom_queue = mQueue()
+        dicom_queue = mQueue(maxsize=self.config.max_dicom_queue)
         for patient_folder in data_root.glob("*[!.json]"):
             folder_queue.put(patient_folder)
         for _ in range(self.config.num_producer):
             folder_queue.put(None)
 
         producer_processes = [
-            Process(target=DataProducer(self.config).run, args=(folder_queue, dicom_queue, True))
+            Process(target=DataProducer(self.config).run, args=(folder_queue, dicom_queue))
             for _ in range(self.config.num_producer)
         ]
         consumer_processes = [
@@ -408,19 +429,14 @@ class SlicePreprocessingPipeline:
             p.start()
         for p in producer_processes:
             p.join()
-            print("producer joined")
         for _ in range(self.config.num_consumer):
-            print("put none to queue")
             dicom_queue.put(None)
-            print("put none to done")
         for p in consumer_processes:
             p.join()
-            print("consumer joined")
         folder_queue.cancel_join_thread()
         dicom_queue.cancel_join_thread()
 
 if __name__ == "__main__":
-    print(os.getcwd())
     pipeline = SlicePreprocessingPipeline()
     pipeline.run()
     print("all task done")
