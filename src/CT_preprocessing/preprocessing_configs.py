@@ -13,7 +13,7 @@ class EqualizeConfig:
     _value_range: tuple[int, int]
     kernel_size_ratio: float = 1/16
     clip_limit: float = 0.005
-    nbins: int | None = field(init=False, default=None)
+    nbins: int = field(init=False, default=0)
     def __post_init__(self,):
         self.nbins = max(self._value_range) - min(self._value_range)
 
@@ -31,7 +31,7 @@ class SlicePreprocessingConfig:
     target_slice_size: tuple[int, int] = (512, 512)
     value_range: tuple[int, int] = (100, 1024)
     export_value_range: tuple[int, int] = (-1024, 1024)
-    align_slice_percentile: tuple[int] = tuple({5, 25, 50, 75, 95})
+    align_slice_percentile: tuple[int, ...] = tuple({5, 25, 50, 75, 95})
     padding_value: int = 0
     split_num: int = 5
     top_k_offset: int = 2
