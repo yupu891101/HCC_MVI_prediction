@@ -215,7 +215,7 @@ class DataConsumer:
             score_list: list[float] = []
             for target_slice in target_dicom:
                 score_list.append(self.cal_similarity(ref_slice, target_slice))
-            np.save(f"./{int(time.time())}.npy", np.array(score_list))
+            # np.save(f"./{int(time.time())}.npy", np.array(score_list))
             confidence = self.get_confidence(np.array(score_list))
 
             offset_dict[confidence] = score_list.index(max(score_list)) - slice_index
