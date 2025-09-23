@@ -11,10 +11,10 @@ from PyQt5.QtGui import QPixmap, QImage
 
 
 class NiiViewer(QWidget):
-    def __init__(self, root_dir):
+    def __init__(self, img_dir, seg_dir):
         super().__init__()
-        self.root_dir = root_dir
-        self.seg_dir = r"D:\Workspace\HCC_MVI_prediction\data_folder\processed_data\first_version\labelsTr"
+        self.img_dir = img_dir
+        self.seg_dir = seg_dir
         self.current_index = 0
         self.slice_index = 0
         self.saved_slices = {}
@@ -134,13 +134,13 @@ class NiiViewer(QWidget):
             line_edit.setVisible(checked)
 
     def load_patient_ids(self):
-        files = os.listdir(self.root_dir)
+        files = os.listdir(self.img_dir)
         patient_ids = set()
         for f in files:
             if f.endswith(".nii.gz"):
                 parts = f.split("_")
                 if len(parts) >= 3:
-                    patient_ids.add(parts[1])
+                    patient_ids.add(parts[1][:-2])
         return sorted(list(patient_ids))
 
     def combo_patient_changed(self, index):
@@ -155,15 +155,21 @@ class NiiViewer(QWidget):
 
         for phase in ["0001", "0002", "0003"]:
             phase_idx = int(phase)
-            path = os.path.join(self.root_dir, f"HCC_{patient_id[:-2]}P{phase_idx}_{phase}.nii.gz")
+            path = os.path.join(self.img_dir, f"HCC_{patient_id}P{phase_idx}_{phase}.nii.gz")
             if os.path.exists(path):
                 nii = nib.load(path)
                 self.phase_images.append(nii.get_fdata())
             else:
                 self.phase_images.append(np.zeros((256, 256, 1)))
 
-        seg_path = os.path.join(self.seg_dir, f"HCC_{patient_id}.nii.gz")
-        if os.path.exists(seg_path):
+        seg_path = None
+        for i in range(1, 5):  # Check for P1, P2, P3, P4
+            potential_path = os.path.join(self.seg_dir, f"HCC_{patient_id}P{i}.nii.gz")
+            if os.path.exists(potential_path):
+                seg_path = potential_path
+                break
+
+        if seg_path:
             seg_img = nib.load(seg_path).get_fdata()
             self.seg_image = seg_img.astype(np.uint8)
             unique_vals = sorted(np.unique(self.seg_image))
@@ -381,9 +387,9 @@ class NiiViewer(QWidget):
     def find_min_slice_volume(self):
         min_slices = float('inf')
         min_file = None
-        for fname in os.listdir(self.root_dir):
+        for fname in os.listdir(self.img_dir):
             if fname.endswith(".nii.gz"):
-                path = os.path.join(self.root_dir, fname)
+                path = os.path.join(self.img_dir, fname)
                 try:
                     nii = nib.load(path)
                     shape = nii.shape
@@ -398,6 +404,7 @@ class NiiViewer(QWidget):
 if __name__ == "__main__":
     import sys
     app = QApplication(sys.argv)
-    viewer = NiiViewer(r"D:\Workspace\HCC_MVI_prediction\data_folder\processed_data\first_version\imagesTr")
+    root_path = "../../data_folder/processed_data/first_version"
+    viewer = NiiViewer(os.path.join(root_path, "imagesTr"), os.path.join(root_path, "labelsTr"))
     viewer.show()
     sys.exit(app.exec_())
