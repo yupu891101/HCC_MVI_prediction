@@ -1,6 +1,4 @@
-import os
 import sys
-import importlib
 from queue import Queue
 from pathlib import Path
 from typing import Literal
@@ -20,20 +18,14 @@ if __package__ :
 else:
     # import for multiprocessing and directly run
     sys.path.append("./src/CT_preprocessing/")
-    preprocessing_configs = importlib.import_module("preprocessing_configs")
-    preprocess_utils = importlib.import_module("utils.preprocess_utils")
-    Config = preprocessing_configs.SlicePreprocessingConfig
-    EqualizeConfig = preprocessing_configs.EqualizeConfig
-    normalized_cross_correlation_fft = preprocess_utils.normalized_cross_correlation_fft
-    slice_resize = preprocess_utils.slice_resize
-
-
-# from ..preprocessing_configs import SlicePreprocessingConfig as Config
-# from ..preprocessing_configs import EqualizeConfig
-# from ..utils.preprocess_utils import normalized_cross_correlation_fft, slice_resize
+    from preprocessing_configs import SlicePreprocessingConfig as Config
+    from preprocessing_configs import EqualizeConfig
+    from utils.preprocess_utils import normalized_cross_correlation_fft, slice_resize
 
 Confidence = float
 Offset = int
+PhaseNames = Literal["arterial_phase", "portal_venous_phase", "delayed_phase"] | str
+LabelNames = Literal["arterial_label", "portal_venous_label", "delayed_label"] | str
 @dataclass
 class PatientDicom:
     patient_id: str
@@ -50,15 +42,13 @@ class PatientDicom:
     proc_portal_venous_phase: np.ndarray | None = field(default=None, init=False, repr=False)
     proc_delayed_phase: np.ndarray | None = field(default=None, init=False, repr=False)
 
-    min_clip_val: int | float | None = field(default=-1024, init=False)
-    max_clip_val: int | float | None = field(default=1024, init=False)
-    align_result: dict[str, int] | None = field(default=None, init=False)
-    all_proc_phase: dict[str, np.ndarray] = field(init=False, repr=False)
-    all_phase: dict[str, np.ndarray] = field(init=False, repr=False)
-    all_label: dict[str, np.ndarray | None] = field(init=False, repr=False)
-    ref_phase: Literal[
-        "arterial_phase", "portal_venous_phase", "delayed_phase"
-    ] | None = field(default=None, init=False)
+    min_clip_val: int | float = field(default=-1024, init=False)
+    max_clip_val: int | float = field(default=1024, init=False)
+    align_result: dict[PhaseNames, int] | None = field(default=None, init=False)
+    all_proc_phase: dict[PhaseNames, np.ndarray] = field(init=False, repr=False)
+    all_phase: dict[PhaseNames, np.ndarray] = field(init=False, repr=False)
+    all_label: dict[LabelNames, np.ndarray | None] = field(init=False, repr=False)
+    ref_phase: PhaseNames | None = field(default=None, init=False)
     def __post_init__(self,):
         self.min_clip_val = min(self.value_range)
         self.max_clip_val = max(self.value_range)
@@ -83,8 +73,7 @@ class PatientDicom:
 
     def clip(self, dicom_array: np.ndarray, value_range: tuple[int, int] | None = None):
         min_val, max_val = value_range or (self.min_clip_val, self.max_clip_val)
-        return np.clip(
-            dicom_array,
+        return dicom_array.clip(
             min=min_val, max=max_val,
             dtype=np.float32
         )
@@ -97,14 +86,14 @@ class PatientDicom:
     def set_align_result(self, result: dict[str, int]):
         self.align_result = result
 
-    def set_ref_phase(self, phase_name: str):
+    def set_ref_phase(self, phase_name: PhaseNames):
         self.ref_phase = phase_name
 
 class DataProducer:
     def __init__(self ,config: Config):
         self.config = config
 
-    def read_all_dicom(self, phase_folder: Path) -> dict[str, np.ndarray]:
+    def read_all_dicom(self, phase_folder: Path) -> dict[str, np.ndarray | int]:
         print(phase_folder.name, "start")
         if "non_contrast" in phase_folder.name:
             return dict()
@@ -217,7 +206,8 @@ class DataConsumer:
         dicom_array = slice_resize(dicom_array, self.config.target_slice_size)
         return dicom_array
 
-    def _slice_align(self, slice_percentile: tuple[int], ref_dicom: np.ndarray, target_dicom: np.ndarray) -> int:
+    def _slice_align(self, slice_percentile: tuple[int, ...], ref_dicom: np.ndarray, target_dicom: np.ndarray) -> int:
+        import time
         offset_dict: dict[Confidence, Offset] = dict()
         slice_indecies = [int(percentile / 100 * len(ref_dicom)) for percentile in slice_percentile]
         for slice_index in slice_indecies:
@@ -225,13 +215,14 @@ class DataConsumer:
             score_list: list[float] = []
             for target_slice in target_dicom:
                 score_list.append(self.cal_similarity(ref_slice, target_slice))
+            np.save(f"./{int(time.time())}.npy", np.array(score_list))
             confidence = self.get_confidence(np.array(score_list))
 
             offset_dict[confidence] = score_list.index(max(score_list)) - slice_index
         offset_list = [v for _, v in sorted(offset_dict.items(), reverse=True)][:self.config.top_k_offset]
         return round(sum(offset_list) / len(offset_list))
 
-    def slice_align(self, patient_dicom: PatientDicom) -> PatientDicom:
+    def slice_align(self, patient_dicom: PatientDicom):
         shortest_phase_name = min(patient_dicom.all_proc_phase, key=lambda k: len(patient_dicom.all_proc_phase[k]))
         ref_phase = patient_dicom.all_proc_phase[shortest_phase_name]
         patient_dicom.set_ref_phase(shortest_phase_name)
@@ -268,9 +259,9 @@ class DataConsumer:
 
     def alignment(
         self,
-        align_result: dict[str, int],
-        process_dict: dict[str, np.ndarray],
-        ref_phase: str,
+        input_align_result: dict[PhaseNames, int] | None,
+        input_process_dict: dict[PhaseNames, np.ndarray] | dict[LabelNames, np.ndarray | None],
+        input_ref_phase: PhaseNames | None,
         target_instance: Literal["phase", "label"]
     ):
         """
@@ -285,12 +276,22 @@ class DataConsumer:
         Returns:
             Dict[str, List]: 包含所有補齊後列表的字典。
         """
+        if input_align_result is None:
+            raise ValueError("align_result should not be None")
+        if input_ref_phase is None:
+            raise ValueError("ref_phase should not be None")
+        if any(value is None for value in input_process_dict.values()):
+            return None
+        process_dict: dict[PhaseNames, np.ndarray] | dict[LabelNames, np.ndarray] = input_process_dict
         if target_instance == "label":
-            ref_phase = ref_phase.replace("phase", "label")
+            ref_phase = input_ref_phase.replace("phase", "label")
             align_result = {
                 phase.replace("phase", "label"): offset
-                for phase, offset in align_result.items()
+                for phase, offset in input_align_result.items()
             }
+        else:
+            ref_phase = input_ref_phase
+            align_result = input_align_result
 
         max_offset = max(0, *list(align_result.values()))
         # 1. 計算所有array需要的總長度
@@ -343,7 +344,7 @@ class DataConsumer:
             split_dicoms: list[np.ndarray] = [
                 phase_dicom[i::self.config.split_num] for i in range(self.config.split_num)
             ]
-            split_labels: list[np.ndarray] = [
+            split_labels: list[np.ndarray | None] = [
                 phase_label[i::self.config.split_num] for i in range(self.config.split_num)
             ] if phase_label is not None else [None] * self.config.split_num
         else:
@@ -401,6 +402,15 @@ class DataConsumer:
             print(f"Align {patient_dicom} done")
             self.export_dicom(patient_dicom)
             print(f"export {patient_dicom} done")
+
+    def align_patient(self, patient_dicom: PatientDicom) -> PatientDicom:
+        print(f"Start to process {patient_dicom}")
+        patient_dicom = self.process_dicom(patient_dicom)
+        print(f"process {patient_dicom} done")
+        print(f"Start to align {patient_dicom}")
+        self.slice_align(patient_dicom)
+        print(f"Align {patient_dicom} done")
+        return patient_dicom
 
 class SlicePreprocessingPipeline:
     def __init__(self):
