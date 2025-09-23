@@ -13,20 +13,21 @@ INTERPOLATION_MAPPING = {
 def normalized_cross_correlation_fft(array1: np.ndarray, array2: np.ndarray) -> np.ndarray:
     """
     使用 FFT 快速計算兩個陣列的標準化互相關。
-    """
-    array1 = array1.astype(np.float64)
-    array2 = array2.astype(np.float64)
 
-    # 減去均值
+    :param array1: 主陣列 (template)
+    :param array2: 樣板陣列
+    :return: 正規化互相關結果陣列
+    """
+
     array1 = array1 - array1.mean()
     array2 = array2 - array2.mean()
+
     cross_correlation = fftconvolve(array1, np.flip(array2), mode='same')
 
-    array1_auto_correlation = np.sum(array1**2)
-    ones_array1 = np.ones_like(array1)
-    array2_auto_correlation = fftconvolve(array2**2, np.flip(ones_array1), mode='same')
+    array1_variance_sum = fftconvolve(array1**2, np.ones_like(array2), mode='same')
+    array2_variance_sum = np.sum(array2**2)
 
-    denominator = np.sqrt(array1_auto_correlation * array2_auto_correlation)
+    denominator = np.sqrt(array1_variance_sum * array2_variance_sum)
     denominator[denominator == 0] = 1e-12
 
     normalized_result = cross_correlation / denominator
