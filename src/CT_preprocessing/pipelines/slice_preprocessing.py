@@ -1,7 +1,7 @@
 import sys
 from queue import Queue
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Any
 from dataclasses import dataclass, field
 from multiprocessing import Process
 from multiprocessing import Queue as mQueue
@@ -30,7 +30,6 @@ LabelNames = Literal["arterial_label", "portal_venous_label", "delayed_label"] |
 class PatientDicom:
     patient_id: str
     slice_thickness: int
-    value_range: tuple[int, int]
     arterial_phase: np.ndarray = field(repr=False)
     portal_venous_phase: np.ndarray = field(repr=False)
     delayed_phase: np.ndarray = field(repr=False)
@@ -44,6 +43,8 @@ class PatientDicom:
 
     min_clip_val: int | float = field(default=-1024, init=False)
     max_clip_val: int | float = field(default=1024, init=False)
+    ref_percentile: int | float = field(default=Config.reference_percentile, init=False)
+    value_range: tuple[int, int] = field(default=Config.value_range, init=False)
     align_result: dict[PhaseNames, int] | None = field(default=None, init=False)
     all_proc_phase: dict[PhaseNames, np.ndarray] = field(init=False, repr=False)
     all_phase: dict[PhaseNames, np.ndarray] = field(init=False, repr=False)
@@ -71,15 +72,22 @@ class PatientDicom:
             "delayed_label": self.delayed_label
         }
 
-    def clip(self, dicom_array: np.ndarray, value_range: tuple[int, int] | None = None):
-        min_val, max_val = value_range or (self.min_clip_val, self.max_clip_val)
+    def clip(
+            self,
+            dicom_array: np.ndarray,
+            value_range: tuple[int, int] | None = None,
+            hu_offset: np.number = np.int16(0)
+        ):
+        val_range = value_range or (self.min_clip_val, self.max_clip_val)
+        min_val, max_val = sorted(val_range)
+        dicom_array = dicom_array - hu_offset
         return dicom_array.clip(
-            min=min_val, max=max_val,
-            dtype=np.float32
+            min=min_val, max=max_val
         )
 
     def _normalize(self, dicom_array: np.ndarray):
-        dicom_array = self.clip(dicom_array)
+        hu_offset = np.percentile(dicom_array, self.ref_percentile)
+        dicom_array = self.clip(dicom_array, hu_offset=hu_offset)
         dicom_array = (dicom_array - self.min_clip_val) / (self.max_clip_val - self.min_clip_val)
         return dicom_array
 
@@ -122,7 +130,7 @@ class DataProducer:
         return round(slice_instance.GetSpacing()[slice_thickness_index])
 
     def read_all_phase(self, patient_folder: Path) -> PatientDicom:
-        patient_dicom = {"patient_id": patient_folder.name, "value_range": self.config.value_range}
+        patient_dicom: dict[str, Any] = {"patient_id": patient_folder.name}
         with ThreadPoolExecutor(max_workers=self.config.num_producer_thread) as excutor:
             dicom_results = excutor.map(self.read_all_dicom, patient_folder.glob("*[!.jpg]"))
 
@@ -206,8 +214,13 @@ class DataConsumer:
         dicom_array = slice_resize(dicom_array, self.config.target_slice_size)
         return dicom_array
 
-    def _slice_align(self, slice_percentile: tuple[int, ...], ref_dicom: np.ndarray, target_dicom: np.ndarray) -> int:
-        import time
+    def _slice_align(
+            self,
+            slice_percentile: tuple[float | int, ...],
+            ref_dicom: np.ndarray,
+            target_dicom: np.ndarray
+        ) -> int:
+        # import time
         offset_dict: dict[Confidence, Offset] = dict()
         slice_indecies = [int(percentile / 100 * len(ref_dicom)) for percentile in slice_percentile]
         for slice_index in slice_indecies:
@@ -215,7 +228,7 @@ class DataConsumer:
             score_list: list[float] = []
             for target_slice in target_dicom:
                 score_list.append(self.cal_similarity(ref_slice, target_slice))
-            np.save(f"./{int(time.time())}.npy", np.array(score_list))
+            # np.save(f"./{int(time.time())}.npy", np.array(score_list))
             confidence = self.get_confidence(np.array(score_list))
 
             offset_dict[confidence] = score_list.index(max(score_list)) - slice_index
@@ -365,7 +378,7 @@ class DataConsumer:
 
     def save_dicom_to_nii(self, patient_dicom: PatientDicom):
         save_category = "imagesTs" if patient_dicom.arterial_label is None else "imagesTr"
-        need_split = patient_dicom.slice_thickness < 5
+        need_split = patient_dicom.slice_thickness < 3
 
         for idx, (phase_name, phase_dicom) in enumerate(patient_dicom.all_phase.items()):
             phase_id = idx + 1

@@ -2,10 +2,9 @@ import shutil
 from pathlib import Path
 
 
-def rename_patient_folder(data_root: str) -> None:
+def rename_patient_folder(data_root_path: Path) -> None:
     """ rename all patient in raw_data/MVI from "1 (1mm)" to "001"
     """
-    data_root_path = Path(data_root)
     mvi_data_path_list = data_root_path.glob("*")
     for data_folder in mvi_data_path_list:
         name_splits = data_folder.name.split(" ")
@@ -18,8 +17,7 @@ def rename_patient_folder(data_root: str) -> None:
         except FileNotFoundError as e:
             print(e)
 
-def rename_phase_folder(data_root: str) -> None:
-    data_root_path = Path(data_root)
+def rename_phase_folder(data_root_path: Path) -> None:
     patient_folders = data_root_path.glob("*[!.json]")
     for single_patient in patient_folders:
         phase_folders = sorted(single_patient.glob("*[!.jpg]"))

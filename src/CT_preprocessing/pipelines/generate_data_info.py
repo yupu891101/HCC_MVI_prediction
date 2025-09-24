@@ -1,15 +1,24 @@
 import os
+import sys
 import json
 from pathlib import Path
 
 import pydicom
 from tqdm.auto import tqdm
-from ..preprocessing_configs import DataInfoPipelineConfig as Config
-from ..utils.path_modify_utils import rename_patient_folder, rename_phase_folder, rename_label_file
+
+
+if __package__ :
+    from ..preprocessing_configs import DataInfoPipelineConfig as Config
+    from ..utils.path_modify_utils import rename_patient_folder, rename_phase_folder, rename_label_file
+else:
+    # import for multiprocessing and directly run
+    sys.path.append("./src/CT_preprocessing/")
+    from preprocessing_configs import DataInfoPipelineConfig as Config
+    from utils.path_modify_utils import rename_patient_folder, rename_phase_folder, rename_label_file
 
 class DataInfoPipeline:
-    def __init__(self):
-        self.config = Config()
+    def __init__(self, config: Config):
+        self.config = config
 
     def parsing_dicom_info(self, patient_folder: Path):
         dicom_info = {}
@@ -49,3 +58,7 @@ class DataInfoPipeline:
         data_info = self.gen_data_info(self.config.raw_data_path)
         with open(self.config.data_info_json_path, "w", encoding="utf-8") as j:
             json.dump(data_info, j, ensure_ascii=False, indent=4)
+
+if __name__ == "__main__":
+    data_pipeline = DataInfoPipeline(Config())
+    data_pipeline.run()
