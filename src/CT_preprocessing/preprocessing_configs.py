@@ -29,14 +29,15 @@ class SlicePreprocessingConfig:
     max_dicom_queue: int = 1
 
     target_slice_size: tuple[int, int] = (512, 512)
-    value_range: tuple[int, int] = (100, 1024)
+    value_range: tuple[int, int] = (-50, 1024)
+    reference_percentile: int | float = 75
     export_value_range: tuple[int, int] = (-1024, 1024)
-    align_slice_percentile: tuple[int, ...] = tuple({5, 25, 50, 75, 95})
+    align_slice_percentile: tuple[int | float, ...] = tuple({5, 25, 50, 75, 95})
     padding_value: int = 0
     split_num: int = 5
     top_k_offset: int = 2
     _equalize_config = EqualizeConfig(value_range)
-    
+
     def __post_init__(self,):
         image_tr_path = self.save_data_path.joinpath("imagesTr")
         image_ts_path = self.save_data_path.joinpath("imagesTs")
