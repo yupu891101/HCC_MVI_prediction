@@ -1,4 +1,5 @@
 import sys
+import json
 from queue import Queue
 from pathlib import Path
 from typing import Literal, Any
@@ -80,7 +81,7 @@ class PatientDicom:
         ):
         val_range = value_range or (self.min_clip_val, self.max_clip_val)
         min_val, max_val = sorted(val_range)
-        dicom_array = dicom_array - hu_offset
+        dicom_array = dicom_array - min(hu_offset, 0)
         return dicom_array.clip(
             min=min_val, max=max_val
         )
@@ -235,7 +236,7 @@ class DataConsumer:
         offset_list = [v for _, v in sorted(offset_dict.items(), reverse=True)][:self.config.top_k_offset]
         return round(sum(offset_list) / len(offset_list))
 
-    def slice_align(self, patient_dicom: PatientDicom):
+    def slice_align(self, patient_dicom: PatientDicom, keep_dicom: bool = False):
         shortest_phase_name = min(patient_dicom.all_proc_phase, key=lambda k: len(patient_dicom.all_proc_phase[k]))
         ref_phase = patient_dicom.all_proc_phase[shortest_phase_name]
         patient_dicom.set_ref_phase(shortest_phase_name)
@@ -250,6 +251,10 @@ class DataConsumer:
                 target_pahse
             )
         patient_dicom.set_align_result(offset_result)
+
+        if not keep_dicom:
+            for phase_name in patient_dicom.all_proc_phase.keys():
+                del patient_dicom.all_proc_phase[phase_name]
 
     def process_dicom(self, patient_dicom: PatientDicom) -> PatientDicom:
         for (phase_name, phase_dicom), (label_phase_name, phase_label) in zip(
@@ -379,6 +384,11 @@ class DataConsumer:
     def save_dicom_to_nii(self, patient_dicom: PatientDicom):
         save_category = "imagesTs" if patient_dicom.arterial_label is None else "imagesTr"
         need_split = patient_dicom.slice_thickness < 3
+        offset_save_path = self.config.save_data_path.joinpath(
+                f"labelsTr/{patient_dicom.patient_id}.nii.gz"
+            )
+        with open(offset_save_path.as_posix(), "w", encoding="utf-8") as f:
+            json.dump(patient_dicom.align_result, f)
 
         for idx, (phase_name, phase_dicom) in enumerate(patient_dicom.all_phase.items()):
             phase_id = idx + 1
