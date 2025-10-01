@@ -30,7 +30,7 @@ class SlicePreprocessingConfig:
 
     target_slice_size: tuple[int, int] = (512, 512)
     value_range: tuple[int, int] = (-50, 1024)
-    reference_percentile: int | float = 75
+    reference_percentile: int | float = 77.5
     export_value_range: tuple[int, int] = (-1024, 1024)
     align_slice_percentile: tuple[int | float, ...] = tuple({5, 25, 50, 75, 95})
     padding_value: int = 0
